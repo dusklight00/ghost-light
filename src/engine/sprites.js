@@ -16,7 +16,9 @@ function drawTopDownGuy(ctx, s, bodyColor, headColor, gunColor, outline) {
 }
 
 // A simple front-facing bust for dialogue portraits: hair block, face oval, two-tone outfit.
-function drawPortrait(ctx, s, { skin, hair, outfit, accent }) {
+// Exported so plain 2D-canvas UI components (dialogue boxes, cutscenes) can draw the same art
+// directly, without needing a WebGL context.
+export function drawPortrait(ctx, s, { skin, hair, outfit, accent }) {
   ctx.fillStyle = outfit;
   ctx.fillRect(s * 0.15, s * 0.62, s * 0.70, s * 0.38);
   ctx.fillStyle = accent;
@@ -31,7 +33,7 @@ function drawPortrait(ctx, s, { skin, hair, outfit, accent }) {
   ctx.fillRect(s * 0.58, s * 0.44, s * 0.08, s * 0.04);
 }
 
-const PORTRAIT_PALETTES = {
+export const PORTRAIT_PALETTES = {
   elias: { skin: "#d9b08c", hair: "#3a2a1c", outfit: "#2a3138", accent: "#1fb8d6" },
   naila: { skin: "#c99a76", hair: "#241a14", outfit: "#3a2436", accent: "#c74fae" },
   sable: { skin: "#e2c3a3", hair: "#8d8d8d", outfit: "#26292c", accent: "#c9c9c9" },

@@ -1,0 +1,23 @@
+export const act1Dialogue = {
+  intro: [
+    { speaker: "narration", text: "Halvern. Nine years after the Blackout. The Concord's lights never go out, and nobody under twenty remembers a night when they did." },
+    { speaker: "narration", text: "Elias Marr fixes lamps for a living. Checkpoint poles, mostly. He likes the work. A light works or it doesn't." },
+    { speaker: "narration", text: "He met Naila over a boring records request. She had a laugh that arrived before she meant it to." },
+    { speaker: "elias", text: "Marry me. I mean — I'm asking. I had a whole speech." },
+    { speaker: "naila", text: "Yes." },
+    { speaker: "elias", text: "You didn't even let me finish the sentence." },
+    { speaker: "naila", text: "I already knew the ending. Some of us read ahead." },
+    { speaker: "narration", text: "He didn't know she'd spent that whole year copying pre-Blackout grid schematics into a notebook that never touched a Concord database." },
+    { speaker: "narration", text: "He didn't know her 'boring' records requests were tracing something specific — emergency generators, staged in three Concord depots, four days before the grid ever went down." },
+    { speaker: "narration", text: "He found out on a Tuesday. He'd fixed eleven lamps that day. He was going to tell her over dinner like it mattered." },
+    { speaker: "narration", text: "Four Compliance vehicles were already outside the apartment block. No sirens. The Concord learned a long time ago that sirens give people time to think." },
+    { speaker: "elias", text: "Naila!" },
+    { speaker: "naila", text: "Elias—" },
+    { speaker: "narration", text: "She wasn't struggling. That was the part that broke something in him first — she'd already decided this cost was hers to pay, long before he ever knew there was a ledger." },
+    { speaker: "elias", text: "Let her go. Let her — get off her—" },
+    { speaker: "naila", text: "If you kill him I will never give you one more word. Do you understand me. Not one." },
+    { speaker: "narration", text: "The baton found the side of his skull. The world went white, then wrong, then very far away." },
+    { speaker: "narration", text: "The Concord's own log would call it 'subject rendered non-viable, remanded to dead zone disposal.' They didn't even bury people who didn't matter. They just put them where the lights didn't reach, and let the dark finish the job." },
+    { speaker: "narration", text: "The dark did not finish the job." },
+  ],
+};

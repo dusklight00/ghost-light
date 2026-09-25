@@ -1,0 +1,20 @@
+export const act3Dialogue = {
+  intro: [
+    { speaker: "narration", text: "Eight months. A codename that stuck. A grief that stopped shrinking and just found more places to live." },
+    { speaker: "narration", text: "It also, without either of them deciding it out loud, bought him Echo." },
+    { speaker: "echo", text: "You're supposed to be in there letting Latch buy you a very badly-deserved drink." },
+    { speaker: "elias", text: "I keep doing the math. How many more of these until it stops feeling like this." },
+    { speaker: "echo", text: "It doesn't stop. You just get more places to put it. First year, I put most of mine into hating a system I used to be proud of building. Might try it." },
+    { speaker: "narration", text: "Weeks later, a conversation neither of them had planned for." },
+    { speaker: "echo", text: "You know this isn't nothing. I'm not going to pretend it is just because the timing's inconvenient for both of us." },
+    { speaker: "elias", text: "I know." },
+    { speaker: "echo", text: "I care about you. Not as your instructor. Not as your handler. I don't need you to say it back tonight. I needed it to exist outside my own head for once." },
+    { speaker: "narration", text: "He didn't say it back that night. He also didn't tell her it wasn't true." },
+    { speaker: "narration", text: "Naila's old notebook — smuggled out of her apartment before the sweep finished — had become the Undertow's roadmap. Proof the Blackout was staged, sitting in one climate-controlled archive vault." },
+    { speaker: "sable", text: "The evidence is real, and it's sitting behind Concord's Central Compliance Archive. Guarded by a commander named Hale Draeger." },
+    { speaker: "echo", text: "I know him. Trained together, before. He's not cruel for the sake of it — that's what makes him dangerous. He believes every Sentinel he's put a bullet in earned it." },
+    { speaker: "echo", text: "You cannot shame a man like that into stopping. You can only out-think him, or you can only stop him." },
+    { speaker: "narration", text: "Elias carried the notebook into every briefing after that. Not because Sable required it. Because finishing her work was the closest thing left to loving her out loud." },
+    { speaker: "sable", text: "Three lesser jobs to bleed the archive's rotation before we go in for real. Get some rest. This one's going to cost us something. It always does." },
+  ],
+};
