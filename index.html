@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WebGL Infiltrator</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; cursor: crosshair; }
+  canvas { display: block; }
+  #hud {
+    position: fixed; top: 10px; left: 12px; color: #eee;
+    font: 15px monospace; text-shadow: 0 0 4px #000; user-select: none;
+  }
+  #hpBarBg {
+    width: 160px; height: 14px; background: #300; border: 1px solid #900; margin-top: 4px;
+  }
+  #hpBarFill { height: 100%; background: #e33; width: 100%; }
+  #overlay {
+    position: fixed; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; color: #fff;
+    font: 20px monospace; background: rgba(0,0,0,0.65); text-align: center;
+  }
+  #overlay button {
+    margin-top: 16px; padding: 8px 20px; font: 16px monospace; cursor: pointer;
+  }
+  #hint {
+    position: fixed; bottom: 10px; left: 12px; color: #888; font: 13px monospace; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud">
+  <div id="objective">Objective: eliminate all guards to unlock the exit</div>
+  <div>Guards remaining: <span id="enemyCount">0</span></div>
+  <div id="hpBarBg"><div id="hpBarFill"></div></div>
+</div>
+<div id="overlay">
+  <div id="overlayText">Game Over</div>
+  <button id="restartBtn">Restart</button>
+</div>
+<div id="hint">Move: WASD / Arrows &nbsp; Aim: Mouse &nbsp; Shoot: Hold Left Click &nbsp; — guards see a cone ahead, hear gunfire, dodge, duck behind cover and roam the map</div>
+<script>
+"use strict";
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl");
+if (!gl) alert("WebGL not supported");
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// --- shader: textured quads/triangles tinted (and alpha-scaled) by a per-vertex color ---
+const vsSrc = `
+  attribute vec2 a_position;
+  attribute vec2 a_texcoord;
+  attribute vec4 a_color;
+  uniform vec2 u_resolution;
+  varying vec2 v_texcoord;
+  varying vec4 v_color;
+  void main() {
+    vec2 zeroToOne = a_position / u_resolution;
+    vec2 clipSpace = zeroToOne * 2.0 - 1.0;
+    gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+    v_texcoord = a_texcoord;
+    v_color = a_color;
+  }
+`;
+const fsSrc = `
+  precision mediump float;
+  varying vec2 v_texcoord;
+  varying vec4 v_color;
+  uniform sampler2D u_tex;
+  void main() {
+    vec4 tex = texture2D(u_tex, v_texcoord);
+    float a = tex.a * v_color.a;
+    if (a < 0.03) discard;
+    gl_FragColor = vec4(tex.rgb * v_color.rgb, a);
+  }
+`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const posLoc = gl.getAttribLocation(prog, "a_position");
+const texLoc = gl.getAttribLocation(prog, "a_texcoord");
+const colorLoc = gl.getAttribLocation(prog, "a_color");
+const resLoc = gl.getUniformLocation(prog, "u_resolution");
+
+const STRIDE = 8 * 4; // x,y,u,v,r,g,b,a
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.enableVertexAttribArray(posLoc);
+gl.enableVertexAttribArray(texLoc);
+gl.enableVertexAttribArray(colorLoc);
+gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, STRIDE, 0);
+gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, STRIDE, 8);
+gl.vertexAttribPointer(colorLoc, 4, gl.FLOAT, false, STRIDE, 16);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+gl.clearColor(0.05, 0.06, 0.08, 1);
+
+// ---------------- pixel-art texture generation (no image files, drawn procedurally) ----------------
+function makeTexture(draw, size, repeat) {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  draw(ctx, size);
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const wrap = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+  return tex;
+}
+
+function drawTopDownGuy(ctx, s, bodyColor, headColor, gunColor, outline) {
+  const cx = s / 2, cy = s / 2 + s * 0.03;
+  ctx.fillStyle = outline;
+  ctx.beginPath(); ctx.ellipse(cx, cy, s * 0.40, s * 0.36, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath(); ctx.ellipse(cx, cy, s * 0.33, s * 0.30, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = headColor;
+  ctx.beginPath(); ctx.ellipse(cx, cy - s * 0.10, s * 0.20, s * 0.18, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = gunColor;
+  ctx.fillRect(cx - s * 0.05, s * 0.02, s * 0.10, s * 0.30);
+}
+
+const floorTex = makeTexture((ctx, s) => {
+  ctx.fillStyle = "#171a20";
+  ctx.fillRect(0, 0, s, s);
+  ctx.fillStyle = "#1d212a";
+  ctx.fillRect(0, 0, s, 2);
+  ctx.fillRect(0, 0, 2, s);
+  ctx.fillStyle = "#12151b";
+  for (let i = 0; i < 6; i++) ctx.fillRect((i * 37 + 5) % s, (i * 53 + 9) % s, 2, 2);
+}, 32, true);
+
+const wallTex = makeTexture((ctx, s) => {
+  ctx.fillStyle = "#54565f";
+  ctx.fillRect(0, 0, s, s);
+  ctx.fillStyle = "#3c3d45";
+  for (let row = 0; row < 4; row++) {
+    const y = row * (s / 4);
+    ctx.fillRect(0, y, s, 2);
+    const offset = (row % 2) * (s / 8);
+    ctx.fillRect(offset % s, y, 2, s / 4);
+    ctx.fillRect((offset + s / 4) % s, y, 2, s / 4);
+    ctx.fillRect((offset + s / 2) % s, y, 2, s / 4);
+    ctx.fillRect((offset + 3 * s / 4) % s, y, 2, s / 4);
+  }
+  ctx.fillStyle = "#63656e";
+  ctx.fillRect(4, 4, 4, 4);
+  ctx.fillRect(s / 2 + 6, s / 2 + 2, 4, 4);
+}, 32, true);
+
+const exitTex = makeTexture((ctx, s) => {
+  ctx.fillStyle = "#123d1c";
+  ctx.fillRect(0, 0, s, s);
+  ctx.fillStyle = "#1f7a3d";
+  ctx.fillRect(2, 2, s - 4, s - 4);
+  ctx.fillStyle = "#123d1c";
+  ctx.fillRect(4, 4, s - 8, s - 8);
+  ctx.fillStyle = "#3ee06b";
+  ctx.beginPath();
+  ctx.moveTo(s * 0.3, s * 0.65); ctx.lineTo(s * 0.5, s * 0.3); ctx.lineTo(s * 0.7, s * 0.65);
+  ctx.closePath(); ctx.fill();
+  ctx.fillRect(s * 0.42, s * 0.55, s * 0.16, s * 0.2);
+}, 32, false);
+
+const playerTex = makeTexture((ctx, s) => drawTopDownGuy(ctx, s, "#1fb8d6", "#0d5866", "#eafbff", "#093036"), 32, false);
+const enemyTex = makeTexture((ctx, s) => drawTopDownGuy(ctx, s, "#d8d8d8", "#8a8a8a", "#ffffff", "#3a3a3a"), 32, false);
+const whiteTex = makeTexture((ctx, s) => { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, s, s); }, 2, false);
+
+// ---------------- batched draw calls, grouped per texture ----------------
+let verts = [];
+function pushVert(x, y, u, v, r, g, b, a) { verts.push(x, y, u, v, r, g, b, a); }
+function quad(x0, y0, x1, y1, x2, y2, x3, y3, u0, v0, u1, v1, r, g, b, a) {
+  pushVert(x0, y0, u0, v0, r, g, b, a); pushVert(x1, y1, u1, v0, r, g, b, a); pushVert(x2, y2, u0, v1, r, g, b, a);
+  pushVert(x2, y2, u0, v1, r, g, b, a); pushVert(x1, y1, u1, v0, r, g, b, a); pushVert(x3, y3, u1, v1, r, g, b, a);
+}
+function rectTex(x, y, w, h, r, g, b, repeatU, repeatV, a) {
+  quad(x, y, x + w, y, x, y + h, x + w, y + h, 0, 0, repeatU || 1, repeatV || 1, r, g, b, a === undefined ? 1 : a);
+}
+function rotatedRectTex(cx, cy, w, h, angle, r, g, b, a) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const hw = w / 2, hh = h / 2;
+  const rot = (lx, ly) => [cx + lx * c - ly * s, cy + lx * s + ly * c];
+  const [x0, y0] = rot(-hw, -hh), [x1, y1] = rot(hw, -hh), [x2, y2] = rot(-hw, hh), [x3, y3] = rot(hw, hh);
+  quad(x0, y0, x1, y1, x2, y2, x3, y3, 0, 0, 1, 1, r, g, b, a === undefined ? 1 : a);
+}
+function triangleFade(x0, y0, a0, x1, y1, a1, x2, y2, a2, r, g, b) {
+  pushVert(x0, y0, 0, 0, r, g, b, a0); pushVert(x1, y1, 0, 0, r, g, b, a1); pushVert(x2, y2, 0, 0, r, g, b, a2);
+}
+// flashlight-style vision cone: raycast per slice against the walls so the light stops at the
+// first wall it hits (a cheap 2D shadow-cast), and fades from innerAlpha at the eye to 0 at the tip
+function visionCone(cx, cy, angle, halfAngle, range, r, g, b, innerAlpha) {
+  const segments = 16;
+  const step = (halfAngle * 2) / segments;
+  const pts = [];
+  for (let i = 0; i <= segments; i++) {
+    const ang = angle - halfAngle + step * i;
+    let dx = Math.cos(ang), dy = Math.sin(ang);
+    if (Math.abs(dx) < 1e-6) dx = 1e-6;
+    if (Math.abs(dy) < 1e-6) dy = 1e-6;
+    const dist = raycastDistance(cx, cy, dx, dy, range);
+    pts.push({ x: cx + dx * dist, y: cy + dy * dist });
+  }
+  for (let i = 0; i < segments; i++) {
+    triangleFade(cx, cy, innerAlpha, pts[i].x, pts[i].y, 0, pts[i + 1].x, pts[i + 1].y, 0, r, g, b);
+  }
+}
+function flush(tex) {
+  if (verts.length === 0) return;
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform2f(resLoc, canvas.width, canvas.height);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+  gl.drawArrays(gl.TRIANGLES, 0, verts.length / 8);
+  verts = [];
+}
+
+// ---------------- input ----------------
+const keys = {};
+window.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
+window.addEventListener("keyup", e => keys[e.key.toLowerCase()] = false);
+const mouse = { x: 0, y: 0, down: false };
+canvas.addEventListener("mousemove", e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+canvas.addEventListener("mousedown", () => mouse.down = true);
+window.addEventListener("mouseup", () => mouse.down = false);
+
+// ---------------- world / level ----------------
+let walls, player, enemies, bullets, exitZone, gameOver, win, fireTimer, noiseEvents, grid;
+
+function buildLevel() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const t = 24;
+  walls = [
+    { x: 0, y: 0, w: W, h: t },
+    { x: 0, y: H - t, w: W, h: t },
+    { x: 0, y: 0, w: t, h: H },
+    { x: W - t, y: 0, w: t, h: H },
+    { x: W * 0.20, y: H * 0.15, w: t, h: H * 0.35 },
+    { x: W * 0.20, y: H * 0.55, w: W * 0.25, h: t },
+    { x: W * 0.45, y: H * 0.20, w: t, h: H * 0.45 },
+    { x: W * 0.60, y: H * 0.60, w: W * 0.22, h: t },
+    { x: W * 0.75, y: H * 0.25, w: t, h: H * 0.35 },
+    { x: W * 0.35, y: H * 0.75, w: W * 0.15, h: t },
+    { x: W * 0.08, y: H * 0.40, w: W * 0.12, h: t },
+  ];
+  grid = buildGrid();
+
+  player = { x: W * 0.08, y: H * 0.85, w: 26, h: 26, speed: 260, hp: 100, maxHp: 100, hitFlash: 0 };
+
+  enemies = [
+    mkEnemy(W * 0.30, H * 0.30),
+    mkEnemy(W * 0.55, H * 0.75),
+    mkEnemy(W * 0.68, H * 0.40),
+    mkEnemy(W * 0.85, H * 0.80),
+    mkEnemy(W * 0.15, H * 0.60),
+    mkEnemy(W * 0.45, H * 0.85),
+    mkEnemy(W * 0.90, H * 0.15),
+    mkEnemy(W * 0.60, H * 0.10),
+  ];
+
+  bullets = [];
+  noiseEvents = [];
+  exitZone = { x: W - 90, y: 40, w: 50, h: 50 };
+  fireTimer = 0;
+  gameOver = false;
+  win = false;
+}
+
+function mkEnemy(x, y) {
+  return {
+    x, y, w: 26, h: 26, hp: 30, maxHp: 30, speed: 90, chaseSpeed: 200,
+    visionRange: 340, fovHalfAngle: Math.PI * 0.5, shootCooldown: 0,
+    facing: Math.PI / 2, alert: false,
+    chasing: false, memory: 0, memoryDuration: 4.5, lastSeenX: x, lastSeenY: y,
+    investigating: false, investigateX: x, investigateY: y, investigateMemory: 0, investigateDuration: 5,
+    seekingCover: false, coverX: x, coverY: y, coverTimer: 0, coverCooldown: 0,
+    dodgeTimer: 0, dodgeCooldown: 0, dodgeVX: 0, dodgeVY: 0,
+    wanderTarget: null, path: [], pathTarget: null, pathRecalc: 0,
+  };
+}
+
+function resetGame() {
+  buildLevel();
+  document.getElementById("overlay").style.display = "none";
+  updateHud();
+}
+
+function updateHud() {
+  document.getElementById("enemyCount").textContent = enemies.length;
+  document.getElementById("hpBarFill").style.width = Math.max(0, player.hp / player.maxHp * 100) + "%";
+  document.getElementById("objective").textContent = enemies.length > 0
+    ? "Objective: eliminate all guards to unlock the exit"
+    : "Objective: reach the green exit zone!";
+}
+
+function showOverlay(text) {
+  document.getElementById("overlayText").textContent = text;
+  document.getElementById("overlay").style.display = "flex";
+}
+document.getElementById("restartBtn").addEventListener("click", resetGame);
+
+function aabb(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+function pointInRect(px, py, r) {
+  return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+}
+function hitsWall(entRect) {
+  for (const w of walls) if (aabb(entRect, w)) return true;
+  return false;
+}
+function hasLineOfSight(x0, y0, x1, y1) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const dist = Math.hypot(dx, dy);
+  const steps = Math.max(1, Math.floor(dist / 10));
+  for (let i = 1; i < steps; i++) {
+    const px = x0 + (dx * i) / steps;
+    const py = y0 + (dy * i) / steps;
+    for (const w of walls) if (pointInRect(px, py, w)) return false;
+  }
+  return true;
+}
+// exact ray-vs-wall distance (slab method), used for both the flashlight shape
+function raycastDistance(ox, oy, dx, dy, maxDist) {
+  let nearest = maxDist;
+  const invDx = 1 / dx, invDy = 1 / dy;
+  for (const w of walls) {
+    let t1 = (w.x - ox) * invDx, t2 = (w.x + w.w - ox) * invDx;
+    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    let t3 = (w.y - oy) * invDy, t4 = (w.y + w.h - oy) * invDy;
+    if (t3 > t4) { const tmp = t3; t3 = t4; t4 = tmp; }
+    const tmin = Math.max(t1, t3), tmax = Math.min(t2, t4);
+    if (tmax < 0 || tmin > tmax) continue;
+    const t = tmin >= 0 ? tmin : tmax;
+    if (t >= 0 && t < nearest) nearest = t;
+  }
+  return nearest;
+}
+function angleDiff(a, b) {
+  let d = Math.abs(a - b) % (Math.PI * 2);
+  return d > Math.PI ? Math.PI * 2 - d : d;
+}
+function moveWithCollision(ent, dx, dy) {
+  ent.x += dx;
+  if (hitsWall(ent)) ent.x -= dx;
+  ent.y += dy;
+  if (hitsWall(ent)) ent.y -= dy;
+}
+
+// ---------------- grid pathfinding (A*) so guards route around walls instead of walking into them ----------------
+function buildGrid() {
+  const cell = 32;
+  const cols = Math.ceil(window.innerWidth / cell), rows = Math.ceil(window.innerHeight / cell);
+  const blocked = new Uint8Array(cols * rows);
+  const margin = 10; // keeps the path a body-width away from wall faces
+  for (let gy = 0; gy < rows; gy++) {
+    for (let gx = 0; gx < cols; gx++) {
+      const cx = gx * cell + cell / 2, cy = gy * cell + cell / 2;
+      let block = false;
+      for (const w of walls) {
+        if (cx > w.x - margin && cx < w.x + w.w + margin && cy > w.y - margin && cy < w.y + w.h + margin) { block = true; break; }
+      }
+      blocked[gy * cols + gx] = block ? 1 : 0;
+    }
+  }
+  return { cell, cols, rows, blocked };
+}
+function cellBlocked(gx, gy) {
+  if (gx < 0 || gy < 0 || gx >= grid.cols || gy >= grid.rows) return true;
+  return grid.blocked[gy * grid.cols + gx] === 1;
+}
+function randomOpenPoint() {
+  for (let tries = 0; tries < 30; tries++) {
+    const gx = Math.floor(Math.random() * grid.cols), gy = Math.floor(Math.random() * grid.rows);
+    if (!cellBlocked(gx, gy)) return { x: gx * grid.cell + grid.cell / 2, y: gy * grid.cell + grid.cell / 2 };
+  }
+  return null;
+}
+const NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+function findPath(sx, sy, tx, ty) {
+  const startGx = Math.floor(sx / grid.cell), startGy = Math.floor(sy / grid.cell);
+  const goalGx = Math.floor(tx / grid.cell), goalGy = Math.floor(ty / grid.cell);
+  const goalKey = goalGy * grid.cols + goalGx;
+  if (cellBlocked(goalGx, goalGy) || (startGx === goalGx && startGy === goalGy)) return [];
+
+  const open = [{ gx: startGx, gy: startGy, g: 0, f: Math.hypot(startGx - goalGx, startGy - goalGy) }];
+  const cameFrom = new Map();
+  const gScore = new Map([[startGy * grid.cols + startGx, 0]]);
+  const closed = new Set();
+
+  let iterations = 0;
+  while (open.length > 0 && iterations++ < 4000) {
+    let bestIdx = 0;
+    for (let i = 1; i < open.length; i++) if (open[i].f < open[bestIdx].f) bestIdx = i;
+    const current = open.splice(bestIdx, 1)[0];
+    const curKey = current.gy * grid.cols + current.gx;
+    if (curKey === goalKey) {
+      const path = [];
+      let k = curKey;
+      while (cameFrom.has(k)) {
+        const gx = k % grid.cols, gy = Math.floor(k / grid.cols);
+        path.push({ x: gx * grid.cell + grid.cell / 2, y: gy * grid.cell + grid.cell / 2 });
+        k = cameFrom.get(k);
+      }
+      return path.reverse();
+    }
+    if (closed.has(curKey)) continue;
+    closed.add(curKey);
+    for (const [dx, dy] of NEIGHBORS) {
+      const nx = current.gx + dx, ny = current.gy + dy;
+      if (cellBlocked(nx, ny)) continue;
+      if (dx !== 0 && dy !== 0 && (cellBlocked(current.gx + dx, current.gy) || cellBlocked(current.gx, current.gy + dy))) continue;
+      const nKey = ny * grid.cols + nx;
+      if (closed.has(nKey)) continue;
+      const tentativeG = current.g + (dx !== 0 && dy !== 0 ? 1.41421 : 1);
+      if (!gScore.has(nKey) || tentativeG < gScore.get(nKey)) {
+        gScore.set(nKey, tentativeG);
+        cameFrom.set(nKey, curKey);
+        open.push({ gx: nx, gy: ny, g: tentativeG, f: tentativeG + Math.hypot(nx - goalGx, ny - goalGy) });
+      }
+    }
+  }
+  return null; // unreachable within budget
+}
+// moves an enemy toward (tx,ty) following its cached path, recomputing when the target moves or
+// the cache goes stale; falls back to a direct line if no path exists. Returns true on arrival.
+function followTarget(e, tx, ty, dt, speed) {
+  e.pathRecalc -= dt;
+  const targetMoved = !e.pathTarget || Math.hypot(tx - e.pathTarget.x, ty - e.pathTarget.y) > 40;
+  if (e.pathRecalc <= 0 || targetMoved) {
+    e.path = findPath(e.x + e.w / 2, e.y + e.h / 2, tx, ty) || [];
+    e.pathTarget = { x: tx, y: ty };
+    e.pathRecalc = 0.5;
+  }
+  const ecx = e.x + e.w / 2, ecy = e.y + e.h / 2;
+  while (e.path.length > 0 && Math.hypot(e.path[0].x - ecx, e.path[0].y - ecy) < 10) e.path.shift();
+  if (e.path.length > 0) {
+    const wp = e.path[0];
+    const ddx = wp.x - ecx, ddy = wp.y - ecy, dd = Math.hypot(ddx, ddy) || 1;
+    e.facing = Math.atan2(ddy, ddx);
+    moveWithCollision(e, (ddx / dd) * speed * dt, (ddy / dd) * speed * dt);
+    return false;
+  }
+  const ddx = tx - ecx, ddy = ty - ecy, dd = Math.hypot(ddx, ddy);
+  if (dd < 10) return true;
+  e.facing = Math.atan2(ddy, ddx);
+  moveWithCollision(e, (ddx / dd) * speed * dt, (ddy / dd) * speed * dt);
+  return false;
+}
+// scripted "smart guard" helper: nearest wall corner that's out of the player's sight line —
+// rule-based stand-in for a trained cover-seeking policy, good enough without an RL training loop
+function findCoverPoint(e, targetPlayer) {
+  const ecx = e.x + e.w / 2, ecy = e.y + e.h / 2;
+  const pcx = targetPlayer.x + targetPlayer.w / 2, pcy = targetPlayer.y + targetPlayer.h / 2;
+  let best = null, bestDist = Infinity;
+  for (const w of walls) {
+    const wcx = w.x + w.w / 2, wcy = w.y + w.h / 2;
+    const corners = [[w.x, w.y], [w.x + w.w, w.y], [w.x, w.y + w.h], [w.x + w.w, w.y + w.h]];
+    for (const [cx, cy] of corners) {
+      const dirx = cx - wcx, diry = cy - wcy;
+      const len = Math.hypot(dirx, diry) || 1;
+      const px = cx + (dirx / len) * 18, py = cy + (diry / len) * 18;
+      const d = Math.hypot(px - ecx, py - ecy);
+      if (d > 260 || hasLineOfSight(px, py, pcx, pcy)) continue;
+      if (d < bestDist) { bestDist = d; best = { x: px, y: py }; }
+    }
+  }
+  return best;
+}
+
+function update(dt) {
+  noiseEvents = [];
+  player.hitFlash = Math.max(0, player.hitFlash - dt);
+
+  // player movement
+  let dx = 0, dy = 0;
+  if (keys["arrowleft"] || keys["a"]) dx -= 1;
+  if (keys["arrowright"] || keys["d"]) dx += 1;
+  if (keys["arrowup"] || keys["w"]) dy -= 1;
+  if (keys["arrowdown"] || keys["s"]) dy += 1;
+  if (dx || dy) {
+    const len = Math.hypot(dx, dy);
+    moveWithCollision(player, (dx / len) * player.speed * dt, (dy / len) * player.speed * dt);
+  }
+  player.x = Math.max(0, Math.min(window.innerWidth - player.w, player.x));
+  player.y = Math.max(0, Math.min(window.innerHeight - player.h, player.y));
+
+  // player shooting toward mouse — a shot is loud, guards nearby will hear it
+  fireTimer -= dt;
+  if (mouse.down && fireTimer <= 0) {
+    const cx = player.x + player.w / 2, cy = player.y + player.h / 2;
+    const ang = Math.atan2(mouse.y - cy, mouse.x - cx);
+    bullets.push({ x: cx, y: cy, w: 6, h: 6, vx: Math.cos(ang) * 620, vy: Math.sin(ang) * 620, owner: "player", originX: cx, originY: cy });
+    noiseEvents.push({ x: cx, y: cy, radius: 380 });
+    fireTimer = 0.15;
+  }
+
+  // squad alert: if any guard currently has eyes on the player, the whole squad is radioed the
+  // position, no distance/wall/hearing limit — this is what makes getting spotted so punishing
+  const pcx0 = player.x + player.w / 2, pcy0 = player.y + player.h / 2;
+  const anyVisible = enemies.some(e => {
+    const ecx = e.x + e.w / 2, ecy = e.y + e.h / 2;
+    const d = Math.hypot(pcx0 - ecx, pcy0 - ecy);
+    const ang = Math.atan2(pcy0 - ecy, pcx0 - ecx);
+    return d < e.visionRange && angleDiff(e.facing, ang) < e.fovHalfAngle && hasLineOfSight(ecx, ecy, pcx0, pcy0);
+  });
+
+  // enemies: directional sight, hearing, chase, shoot, dodge, seek cover, wander when idle
+  for (const e of enemies) {
+    const ecx = e.x + e.w / 2, ecy = e.y + e.h / 2;
+    const pcx = player.x + player.w / 2, pcy = player.y + player.h / 2;
+    const distToPlayer = Math.hypot(pcx - ecx, pcy - ecy);
+    const angleToPlayer = Math.atan2(pcy - ecy, pcx - ecx);
+    const visible = distToPlayer < e.visionRange
+      && angleDiff(e.facing, angleToPlayer) < e.fovHalfAngle
+      && hasLineOfSight(ecx, ecy, pcx, pcy);
+    e.alert = visible;
+
+    e.coverCooldown = Math.max(0, e.coverCooldown - dt);
+    e.dodgeCooldown = Math.max(0, e.dodgeCooldown - dt);
+    e.dodgeTimer = Math.max(0, e.dodgeTimer - dt);
+
+    if (visible) {
+      e.lastSeenX = pcx; e.lastSeenY = pcy;
+      e.memory = e.memoryDuration;
+      e.chasing = true;
+      e.investigating = false;
+      e.facing = angleToPlayer;
+    } else if (anyVisible) {
+      e.lastSeenX = pcx; e.lastSeenY = pcy;
+      e.memory = e.memoryDuration;
+      e.chasing = true;
+      e.investigating = false;
+    } else if (e.chasing) {
+      e.memory -= dt;
+      if (e.memory <= 0) { e.chasing = false; e.wanderTarget = null; e.path = []; }
+    }
+
+    // hearing: a guard not already actively hunting can be drawn toward a nearby gunshot
+    if (!visible && !e.chasing) {
+      for (const n of noiseEvents) {
+        if (Math.hypot(n.x - ecx, n.y - ecy) < n.radius) {
+          e.investigating = true;
+          e.investigateX = n.x; e.investigateY = n.y;
+          e.investigateMemory = e.investigateDuration;
+          e.facing = Math.atan2(n.y - ecy, n.x - ecx);
+          break;
+        }
+      }
+    }
+
+    if (visible && !e.seekingCover) {
+      e.shootCooldown -= dt;
+      if (e.shootCooldown <= 0) {
+        bullets.push({ x: ecx, y: ecy, w: 6, h: 6, vx: Math.cos(e.facing) * 460, vy: Math.sin(e.facing) * 460, owner: "enemy" });
+        noiseEvents.push({ x: ecx, y: ecy, radius: 230 });
+        e.shootCooldown = 0.45;
+      }
+    }
+
+    // dodge: alert guards react to an incoming player bullet by sidestepping it
+    if (!e.seekingCover && (visible || e.chasing || e.investigating) && e.dodgeCooldown <= 0 && e.dodgeTimer <= 0) {
+      for (const b of bullets) {
+        if (b.owner !== "player") continue;
+        const speed2 = b.vx * b.vx + b.vy * b.vy;
+        if (!speed2) continue;
+        const t = ((ecx - b.x) * b.vx + (ecy - b.y) * b.vy) / speed2;
+        if (t < 0 || t > 0.35) continue;
+        const closeX = b.x + b.vx * t, closeY = b.y + b.vy * t;
+        if (Math.hypot(ecx - closeX, ecy - closeY) < 24) {
+          const perp = Math.atan2(b.vy, b.vx) + Math.PI / 2;
+          const side = Math.random() < 0.5 ? 1 : -1;
+          e.dodgeVX = Math.cos(perp) * side * 220;
+          e.dodgeVY = Math.sin(perp) * side * 220;
+          e.dodgeTimer = 0.25;
+          e.dodgeCooldown = 1.0;
+          break;
+        }
+      }
+    }
+
+    // movement priority: dodge > duck to cover > engage in sight > chase (pathfound) > investigate (pathfound) > wander (pathfound)
+    if (e.dodgeTimer > 0) {
+      moveWithCollision(e, e.dodgeVX * dt, e.dodgeVY * dt);
+    } else if (e.seekingCover) {
+      const arrived = followTarget(e, e.coverX, e.coverY, dt, e.chaseSpeed);
+      e.coverTimer -= dt;
+      if (arrived || e.coverTimer <= 0) e.seekingCover = false;
+    } else if (visible) {
+      const tdist = distToPlayer;
+      if (tdist > 40) moveWithCollision(e, (pcx - ecx) / tdist * e.chaseSpeed * dt, (pcy - ecy) / tdist * e.chaseSpeed * dt);
+    } else if (e.chasing) {
+      followTarget(e, e.lastSeenX, e.lastSeenY, dt, e.chaseSpeed);
+    } else if (e.investigating) {
+      e.investigateMemory -= dt;
+      const arrived = followTarget(e, e.investigateX, e.investigateY, dt, e.speed * 1.3);
+      if (arrived || e.investigateMemory <= 0) { e.investigating = false; e.wanderTarget = null; }
+    } else {
+      if (!e.wanderTarget || Math.hypot(e.wanderTarget.x - ecx, e.wanderTarget.y - ecy) < 16) {
+        e.wanderTarget = randomOpenPoint();
+      }
+      if (e.wanderTarget) followTarget(e, e.wanderTarget.x, e.wanderTarget.y, dt, e.speed);
+    }
+  }
+
+  // bullets
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    if (hitsWall(b) || b.x < -20 || b.y < -20 || b.x > window.innerWidth + 20 || b.y > window.innerHeight + 20) {
+      bullets.splice(i, 1);
+      continue;
+    }
+    if (b.owner === "player") {
+      for (const e of enemies) {
+        if (aabb(b, e)) {
+          e.hp -= 15;
+          bullets.splice(i, 1);
+          // getting hit reveals roughly where the shot came from, even if they never saw the shooter
+          const ecx2 = e.x + e.w / 2, ecy2 = e.y + e.h / 2;
+          e.chasing = true;
+          e.investigating = false;
+          e.lastSeenX = b.originX;
+          e.lastSeenY = b.originY;
+          e.memory = e.memoryDuration;
+          e.facing = Math.atan2(b.originY - ecy2, b.originX - ecx2);
+          if (!e.seekingCover && e.coverCooldown <= 0 && Math.random() < 0.6) {
+            const cp = findCoverPoint(e, player);
+            if (cp) { e.seekingCover = true; e.coverX = cp.x; e.coverY = cp.y; e.coverTimer = 1.6; e.coverCooldown = 4; }
+          }
+          break;
+        }
+      }
+    } else if (aabb(b, player)) {
+      player.hp -= 14;
+      player.hitFlash = 0.15;
+      bullets.splice(i, 1);
+    }
+  }
+  enemies = enemies.filter(e => e.hp > 0);
+
+  if (player.hp <= 0 && !gameOver) {
+    gameOver = true;
+    showOverlay("You were eliminated");
+  }
+  if (enemies.length === 0 && aabb(player, exitZone) && !win && !gameOver) {
+    win = true;
+    gameOver = true;
+    showOverlay("Objective complete — you escaped!");
+  }
+
+  updateHud();
+}
+
+function enemyStateColor(e) {
+  if (e.alert) return [1.4, 0.35, 0.25];
+  if (e.chasing) return [1.4, 0.85, 0.25];
+  if (e.investigating) return [0.55, 0.75, 1.4];
+  return [1.1, 0.95, 0.5];
+}
+
+function draw() {
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  rectTex(0, 0, window.innerWidth, window.innerHeight, 1, 1, 1, window.innerWidth / 32, window.innerHeight / 32);
+  flush(floorTex);
+
+  for (const w of walls) rectTex(w.x, w.y, w.w, w.h, 1, 1, 1, w.w / 32, w.h / 32);
+  flush(wallTex);
+
+  const exitOpen = enemies.length === 0;
+  rectTex(exitZone.x, exitZone.y, exitZone.w, exitZone.h, exitOpen ? 1 : 0.55, exitOpen ? 1 : 0.55, exitOpen ? 1 : 0.55);
+  flush(exitTex);
+
+  // torch-light vision cones: wall-occluded and faded, drawn under the sprites
+  for (const e of enemies) {
+    if (e.seekingCover) continue;
+    const [r, g, b] = enemyStateColor(e);
+    visionCone(e.x + e.w / 2, e.y + e.h / 2, e.facing, e.fovHalfAngle, e.visionRange, r, g, b, 0.22);
+  }
+  flush(whiteTex);
+
+  for (const e of enemies) {
+    const [er, eg, eb] = enemyStateColor(e);
+    const dim = e.seekingCover ? 0.7 : 1;
+    rotatedRectTex(e.x + e.w / 2, e.y + e.h / 2, e.w, e.h, e.facing + Math.PI / 2, er * dim, eg * dim, eb * dim);
+  }
+  flush(enemyTex);
+
+  // small red health bar hovering above each guard
+  for (const e of enemies) {
+    const barW = e.w, barH = 5, bx = e.x, by = e.y - 10;
+    const pct = Math.max(0, e.hp / e.maxHp);
+    rectTex(bx, by, barW, barH, 0.15, 0.05, 0.05);
+    rectTex(bx, by, barW * pct, barH, 1.0, 0.15, 0.15);
+  }
+  flush(whiteTex);
+
+  const pcx = player.x + player.w / 2, pcy = player.y + player.h / 2;
+  const aimAngle = Math.atan2(mouse.y - pcy, mouse.x - pcx);
+  const flashed = player.hitFlash > 0;
+  rotatedRectTex(pcx, pcy, player.w, player.h, aimAngle + Math.PI / 2, flashed ? 1.8 : 1, flashed ? 0.3 : 1, flashed ? 0.3 : 1);
+  flush(playerTex);
+
+  for (const b of bullets) {
+    rectTex(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, 1.0, b.owner === "player" ? 0.9 : 0.3, 0.2);
+  }
+  flush(whiteTex);
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (!gameOver) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
